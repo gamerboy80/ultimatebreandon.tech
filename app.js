@@ -1,3 +1,5 @@
+import { GravityField } from './field-physics.js';
+
 const NAME = 'ThatGuyIAmThatGuyNoBodyElseIsThatGuy6767';
 const $ = (selector) => document.querySelector(selector);
 const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
@@ -57,12 +59,23 @@ function setMode(mode, manual = true) {
 }
 document.querySelectorAll('[data-mode]').forEach((button) => button.addEventListener('click', () => setMode(button.dataset.mode)));
 
-function burst() {
+function burst(event) {
   state.burst = 1.6;
+  const point = event?.target?.closest('#scene') ? { x: event.clientX, y: event.clientY } : null;
+  sceneApi?.punch(point);
   sceneApi?.wake();
 }
 $('#burst').addEventListener('click', burst);
-$('#scene').addEventListener('pointerdown', burst);
+let backgroundPress;
+$('#scene').addEventListener('pointerdown', (event) => {
+  if (event.button !== 0) return;
+  backgroundPress = { x: event.clientX, y: event.clientY, time: performance.now() };
+});
+$('#scene').addEventListener('pointerup', (event) => {
+  if (backgroundPress && Math.hypot(event.clientX - backgroundPress.x, event.clientY - backgroundPress.y) < 12 && performance.now() - backgroundPress.time < 700) burst(event);
+  backgroundPress = null;
+});
+$('#scene').addEventListener('pointercancel', () => { backgroundPress = null; });
 $('#explore').addEventListener('click', () => {
   burst();
   $('.drift-section').scrollIntoView({ behavior: reducedMotion.matches ? 'instant' : 'smooth' });
@@ -71,9 +84,11 @@ $('#back-top').addEventListener('click', () => window.scrollTo({ top: 0, behavio
 
 const finePointer = matchMedia('(pointer: fine)');
 const cursor = $('#cursor');
+let pointerInField = false;
 window.addEventListener('pointermove', (event) => {
   state.pointerX = event.clientX / innerWidth * 2 - 1;
   state.pointerY = -(event.clientY / innerHeight * 2 - 1);
+  pointerInField = finePointer.matches && !event.target.closest('button, header, footer');
   document.documentElement.style.setProperty('--glass-x', `${50 + state.pointerX * 35}%`);
   document.documentElement.style.setProperty('--glass-y', `${50 - state.pointerY * 35}%`);
   $('#coordinates').textContent = `X ${state.pointerX >= 0 ? '+' : ''}${state.pointerX.toFixed(2)} / Y ${state.pointerY >= 0 ? '+' : ''}${state.pointerY.toFixed(2)}`;
@@ -85,7 +100,7 @@ window.addEventListener('pointermove', (event) => {
   }
   sceneApi?.wake();
 }, { passive: true });
-document.addEventListener('pointerleave', () => cursor.classList.remove('visible'));
+document.addEventListener('pointerleave', () => { cursor.classList.remove('visible'); pointerInField = false; });
 
 $('#theme-toggle').addEventListener('click', () => {
   state.dark = !state.dark;
@@ -256,9 +271,11 @@ async function initScene() {
       diffuseColor.rgb = mix(diffuseColor.rgb, diffuseColor.rgb * vec3(1.14, .72, .58), uChaos * .25);
     `);
   };
-  const knot = new THREE.Mesh(new THREE.TorusKnotGeometry(1.4, .49, innerWidth < 760 ? 220 : 320, 40, 2, 3), copper);
-  knot.rotation.set(.5, -.4, -.25);
-  sculpture.add(knot);
+  const nucleus = new THREE.Mesh(new THREE.BoxGeometry(1.65, 1.65, 1.65, 6, 6, 6), copper);
+  nucleus.rotation.set(.5, -.4, -.25);
+  const coreEdges = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BoxGeometry(1.67, 1.67, 1.67)), new THREE.LineBasicMaterial({ color: '#ffd0a1', transparent: true, opacity: .4 }));
+  nucleus.add(coreEdges);
+  sculpture.add(nucleus);
 
   // Solid, rounded glass lenses refract the actual copper object behind them.
   const glassMaterial = new THREE.MeshPhysicalMaterial({
@@ -363,20 +380,70 @@ async function initScene() {
   const dust = new THREE.Points(dustGeometry, dustMaterial);
   composition.add(dust);
 
-  // Fragments fly out of their orbit in the third chapter.
-  const satellites = new THREE.Group();
-  sculpture.add(satellites);
-  const satelliteGeometry = new THREE.IcosahedronGeometry(.055, 0);
-  const satelliteMaterial = new THREE.MeshStandardMaterial({ color: '#a8552d', metalness: 1, roughness: .28 });
-  const fragments3d = [];
-  for (let i = 0; i < 35; i++) {
-    const satellite = new THREE.Mesh(satelliteGeometry, satelliteMaterial);
-    const angle = i / 35 * Math.PI * 2;
-    const radius = 2.8 + Math.random() * .8;
-    satellite.userData = { angle, radius, offset: (Math.random() - .5) * 2, scale: .3 + Math.random() * 1.4 };
-    satellite.scale.setScalar(satellite.userData.scale);
-    satellites.add(satellite);
-    fragments3d.push(satellite);
+  const blockShapes = [
+    new THREE.BoxGeometry(1, 1, 1),
+    new THREE.BoxGeometry(.55, 1.65, .65),
+    new THREE.OctahedronGeometry(.8),
+    new THREE.TetrahedronGeometry(.85),
+    new THREE.IcosahedronGeometry(.7, 0),
+    new THREE.TorusGeometry(.55, .18, 8, 20),
+    new THREE.CylinderGeometry(.5, .5, .8, 6)
+  ];
+  const blockMaterials = [
+    new THREE.MeshStandardMaterial({ color: '#a9572e', metalness: .88, roughness: .25 }),
+    new THREE.MeshStandardMaterial({ color: '#34372e', metalness: .65, roughness: .23 }),
+    new THREE.MeshStandardMaterial({ color: '#f3e8d5', metalness: .15, roughness: .34 })
+  ];
+  const fieldBlocks = [];
+  const bodies = [];
+  const blockCount = innerWidth < 760 ? 72 : 120;
+  for (let index = 0; index < blockCount; index++) {
+    const angle = Math.random() * Math.PI * 2;
+    const radius = index % 5 === 0 ? 5.2 + Math.random() * 4 : 2.1 + Math.random() * 2.5;
+    const size = .16 + Math.random() * .29;
+    const depth = (Math.random() - .5) * 2;
+    const body = {
+      x: Math.cos(angle) * radius * 1.2, y: Math.sin(angle) * radius * 1.2, z: depth,
+      vx: -Math.sin(angle) * .3, vy: Math.cos(angle) * .3, vz: 0,
+      radius, size, depth,
+      rx: Math.random() * 6, ry: Math.random() * 6, rz: Math.random() * 6,
+      spin: .25 + Math.random() * .5, baseSpin: .25 + Math.random() * .5
+    };
+    const block = new THREE.Mesh(blockShapes[index % blockShapes.length], blockMaterials[index % blockMaterials.length]);
+    block.scale.setScalar(size);
+    block.position.set(body.x, body.y, body.z);
+    composition.add(block);
+    bodies.push(body);
+    fieldBlocks.push(block);
+  }
+  const gravityField = new GravityField(bodies);
+  const pointerRay = new THREE.Raycaster();
+  const fieldPlane = new THREE.Plane(new THREE.Vector3(0, 0, 1), 0);
+  const pointerWorld = new THREE.Vector3();
+  const pointerNdc = new THREE.Vector2();
+  const shockwaves = Array.from({ length: 4 }, () => {
+    const wave = new THREE.Mesh(new THREE.RingGeometry(.96, 1, 80), new THREE.MeshBasicMaterial({ color: '#ed7540', transparent: true, opacity: 0, depthWrite: false, side: THREE.DoubleSide }));
+    wave.visible = false;
+    composition.add(wave);
+    return { mesh: wave, age: 2 };
+  });
+  let nextShockwave = 0;
+  function screenToField(x, y) {
+    pointerNdc.set(x / innerWidth * 2 - 1, -(y / innerHeight * 2 - 1));
+    camera.updateMatrixWorld();
+    pointerRay.setFromCamera(pointerNdc, camera);
+    pointerRay.ray.intersectPlane(fieldPlane, pointerWorld);
+    return pointerWorld.sub(composition.position);
+  }
+  function punch(screenPoint) {
+    if (state.paused || reducedMotion.matches) return;
+    const point = screenPoint ? screenToField(screenPoint.x, screenPoint.y) : { x: 0, y: 0, z: 0 };
+    gravityField.punch(point);
+    const wave = shockwaves[nextShockwave++ % shockwaves.length];
+    wave.age = 0;
+    wave.mesh.position.set(point.x, point.y, .5);
+    wave.mesh.visible = true;
+    wake();
   }
 
   // Radial lines stretch during warp without needing a post-processing pass.
@@ -504,22 +571,15 @@ async function initScene() {
       lens.rotation.z = data.tilt + Math.sin(state.time * .25 + data.phase) * .1 + scroll * .12;
       lens.rotation.y = -.2 + Math.sin(state.time * .2 + data.phase) * .15;
     });
-    knot.rotation.z = -.25 + morph * .55;
-    knot.rotation.y = -.4 + chaos * .6;
+    nucleus.rotation.z = -.25 + morph * .55;
+    nucleus.rotation.y = -.4 + chaos * .6;
     const knotScale = 1 + state.burst * .035 - state.warp * .11;
-    knot.scale.setScalar(knotScale);
+    nucleus.scale.setScalar(knotScale);
     copper.roughness = .29 - state.warp * .08;
     orbitGroup.rotation.z = state.time * .025 + scroll * .4;
     rings.forEach((ring, index) => {
       ring.scale.setScalar(1 + morph * .1 + chaos * index * .09 + state.burst * .07);
       ring.material.opacity = (index === 1 ? .18 : .45) + darkLerp * .1;
-    });
-    fragments3d.forEach((satellite, index) => {
-      const data = satellite.userData;
-      const angle = data.angle + state.time * (.07 + index * .001);
-      const radius = data.radius * (1 + chaos * .35 + state.burst * .16);
-      satellite.position.set(Math.cos(angle) * radius, data.offset + Math.sin(angle * 2 + state.time * .1) * (chaos * .9 + .2), Math.sin(angle) * radius);
-      satellite.rotation.set(state.time * .2 + index, state.time * .15, index);
     });
     dust.rotation.z = -.35 + scroll * .12;
     dust.rotation.x = .2 + morph * .1;
@@ -531,6 +591,24 @@ async function initScene() {
     const worldWidth = worldHeight * camera.aspect;
     composition.position.set((compositionCenter.x - .5) * worldWidth, (.5 - compositionCenter.y) * worldHeight, 0);
     atmosphereMaterial.uniforms.uViewSize.value.set(worldWidth * 1.1, worldHeight * 1.1);
+    if (animated) {
+      const fieldPointer = pointerInField ? screenToField((state.pointerX + 1) / 2 * innerWidth, (1 - state.pointerY) / 2 * innerHeight) : null;
+      gravityField.advance(dt, { gravity: 1 - morph * .25 + state.warp * .5, swirl: .35 + chaos * 1.25, pointer: fieldPointer });
+    }
+    fieldBlocks.forEach((block, index) => {
+      const body = bodies[index];
+      block.position.set(body.x, body.y, body.z);
+      block.rotation.set(body.rx, body.ry, body.rz);
+    });
+    shockwaves.forEach((wave) => {
+      if (animated) wave.age += dt;
+      const visible = wave.age < 1.1;
+      wave.mesh.visible = visible;
+      if (visible) {
+        wave.mesh.scale.setScalar(.15 + wave.age * 8);
+        wave.mesh.material.opacity = Math.max(0, (1 - wave.age / 1.1) * .4);
+      }
+    });
     if (audio && audioEnabled) audio.filter.frequency.setTargetAtTime(350 + state.warp * 900 + chaos * 150, audio.context.currentTime, .2);
 
     renderer.render(scene, camera);
@@ -566,7 +644,7 @@ async function initScene() {
     $('#scene-status').textContent = 'THE ORBIT IS TAKING A BREATHER. RELOAD TO RETURN.';
   });
   wake();
-  return { wake };
+  return { wake, punch };
 }
 
 initScene().then((api) => { sceneApi = api; }).catch((error) => {
